@@ -15,6 +15,7 @@ import src.models.log_event  # noqa: F401
 import src.models.log_source  # noqa: F401
 import src.models.log_template  # noqa: F401
 import src.models.parse_rule  # noqa: F401
+import src.models.template_split_job  # noqa: F401
 import src.models.user  # noqa: F401
 from src.utils.logger import get_logger
 

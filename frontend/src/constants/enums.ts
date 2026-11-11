@@ -29,13 +29,14 @@ export const LEVEL_LABELS: Record<EventLevel, string> = {
   fatal: 'FATAL',
 };
 
-export const TEMPLATE_STATUSES: TemplateStatus[] = ['mined', 'tentative', 'confirmed', 'noise'];
+export const TEMPLATE_STATUSES: TemplateStatus[] = ['mined', 'tentative', 'confirmed', 'noise', 'split'];
 
 export const TEMPLATE_STATUS_LABELS: Record<TemplateStatus, string> = {
   mined: '已挖掘',
   tentative: '待确认',
   confirmed: '已确认',
   noise: '噪声',
+  split: '已拆分',
 };
 
 export const ALERT_STATUSES: AlertStatus[] = ['firing', 'acknowledged', 'silenced', 'resolved'];

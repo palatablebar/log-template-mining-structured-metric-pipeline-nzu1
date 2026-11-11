@@ -24,6 +24,7 @@ from src.models.log_event import LogEvent
 from src.models.log_source import LogSource
 from src.models.log_template import LogTemplate
 from src.services import drain_engine
+from src.services import template_split_service
 from src.utils.errors import AppError
 from src.utils.logger import get_logger
 from src.utils.text import line_hash, normalize_line, sha1_text, template_signature, truncate
@@ -179,6 +180,12 @@ def apply_preview(db: Session, lines: list[str], result, resolve) -> dict:
             created_templates += 1
         template_by_signature[template.signature] = template_row
 
+    # Drain 命中「库内已知模板」的行不会出现在 result.templates（known 簇被跳过），
+    # 但 line_signatures 里仍带签名；把这些已知模板补进映射，新行才能正确归类（含 split 父模板路由）。
+    for sig in {sig for sig in result.line_signatures if sig}:
+        if sig not in template_by_signature and sig in existing:
+            template_by_signature[sig] = existing[sig]
+
     # 逐行回填：signature → 模板 id；同时把还没入库的行（噪声/新增行）按 line_hash 幂等写入
     sources = {source.id: source for source in db.execute(select(LogSource).order_by(LogSource.id)).scalars().all()}
     default_source = next(iter(sources.values()), None)
@@ -203,8 +210,19 @@ def apply_preview(db: Session, lines: list[str], result, resolve) -> dict:
         signature = line_signatures[index] if index < len(line_signatures) else None
         template_row = template_by_signature.get(signature) if signature else None
         normalized = normalize_line(raw)
-        source_key = template_row.service if template_row else (default_source.name if default_source else "import")
-        resolved_source = resolve(source_key) if template_row else default_source
+        # 命中已拆分的混合父模板时，按本行 service 位定位采集站，路由到该站子模板，
+        # 避免拆分后新导入的同骨架日志又被挂回无事件的父模板（已拆记录不被挪动）。
+        line_source = None
+        if template_row is not None and template_row.status == TemplateStatus.SPLIT.value:
+            line_tokens = drain_engine.tokenize(normalized)
+            if len(line_tokens) > 2:
+                line_source = resolve(line_tokens[2])
+        if line_source is not None:
+            resolved_source = line_source
+            template_row = template_split_service.resolve_import_target(db, template_row, line_source.id)
+        else:
+            source_key = template_row.service if template_row else (default_source.name if default_source else "import")
+            resolved_source = resolve(source_key) if template_row else default_source
         hash_key = line_hash(resolved_source.name if resolved_source else "import", normalized)
         if hash_key in seen_hashes:
             continue
@@ -246,7 +264,10 @@ def apply_preview(db: Session, lines: list[str], result, resolve) -> dict:
         tokens = drain_engine.tokenize(event.raw_line)
         matched = _match_signature(tokens, mined_templates)
         if matched and matched in template_by_signature:
-            event.template_id = template_by_signature[matched].id
+            target = template_by_signature[matched]
+            # pending 事件自带 source_id：split 父模板同样按采集站路由到子模板
+            target = template_split_service.resolve_import_target(db, target, event.source_id)
+            event.template_id = target.id
             event.bucket_start = bucket_start(event.event_time)
             assigned += 1
 

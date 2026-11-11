@@ -642,6 +642,34 @@ textarea {
   border-style: dashed;
 }
 
+.pill.split {
+  color: var(--teal);
+  border-color: var(--teal);
+}
+
+/* ---------------------------------------------------------------- 模板拆分面板 */
+.split-panel {
+  border-top: var(--hair) solid var(--rule);
+  padding-top: 14px;
+  margin-top: 14px;
+}
+
+.split-table td,
+.split-table th {
+  font-size: var(--step--1);
+}
+
+.split-after {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: var(--hair) solid var(--teal);
+  background: var(--teal-wash);
+}
+
+.split-after .ruled {
+  background: var(--paper);
+}
+
 .level {
   display: inline-block;
   width: 48px;

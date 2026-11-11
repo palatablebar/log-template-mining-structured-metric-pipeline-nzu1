@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { templateApi } from '../api/template';
-import type { Template } from '../types/models';
+import type { Template, TemplateDetail } from '../types/models';
 
 interface TemplateState {
   templates: Template[];
@@ -10,6 +10,7 @@ interface TemplateState {
   error: string | null;
   load: () => Promise<void>;
   select: (template: Template) => void;
+  refreshSelected: (id: number) => Promise<void>;
   setFilter: (patch: Partial<{ status: string; search: string }>) => void;
 }
 
@@ -31,5 +32,14 @@ export const useTemplateStore = create<TemplateState>((set, get) => ({
     }
   },
   select: (template) => set({ selected: template }),
+  refreshSelected: async (id) => {
+    try {
+      const detail: TemplateDetail = await templateApi.detail(id);
+      const { samples: _samples, source_breakdown: _breakdown, split_job: _job, is_split: _isSplit, ...base } = detail;
+      set({ selected: base });
+    } catch {
+      /* 详情刷新失败不阻塞列表刷新结果 */
+    }
+  },
   setFilter: (patch) => set({ filter: { ...get().filter, ...patch } }),
 }));

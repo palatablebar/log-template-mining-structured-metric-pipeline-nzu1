@@ -27,9 +27,39 @@ def list_templates(
     )
 
 
+@router.get("/split-jobs", dependencies=[guard("read")])
+def list_split_jobs(db: Session = Depends(get_db)) -> dict:
+    return template_controller.split_jobs(db)
+
+
 @router.get("/{template_id}", dependencies=[guard("read")])
 def get_template(template_id: int, db: Session = Depends(get_db)) -> dict:
     return template_controller.get_template(db, template_id)
+
+
+@router.get("/{template_id}/split-preview", dependencies=[guard("read")])
+def split_preview(template_id: int, db: Session = Depends(get_db)) -> dict:
+    return template_controller.split_preview(db, template_id)
+
+
+@router.post("/{template_id}/split", dependencies=[guard("write")])
+def split_execute(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("templates:write")),
+) -> dict:
+    return template_controller.split_execute(db, template_id, user, request)
+
+
+@router.post("/{template_id}/split-rollback", dependencies=[guard("write")])
+def split_rollback(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("templates:write")),
+) -> dict:
+    return template_controller.split_rollback(db, template_id, user, request)
 
 
 @router.post("/{template_id}/confirm", dependencies=[guard("write")])

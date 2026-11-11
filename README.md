@@ -46,13 +46,34 @@ docker compose up -d --build
 
 ```bash
 docker compose exec -T backend python -m scripts.seed_demo
-# SEED_SUMMARY sources=4 rules=8 templates=8 events=6240 alerts=2 users=3
+# SEED_SUMMARY sources=4 rules=8 templates=9 events=6440 alerts=3 users=3
 ```
 
 演示流程（与 TESTING.md 第 5 节一致）：admin 登录 → `/import`「载入内置样本」→「运行 Drain 挖掘」
 （5 个新模板 / 覆盖率 96.39%）→「应用模板到事件」→ `/events` 看按模板聚合趋势 →
 `/alerts`「运行异常扫描」（error 模板尖峰 z=6.745 触发告警）→ 用 engineer 登录确认并静默 30min →
 viewer 登录验证只读（建规则 403）。
+
+### 2.1 混合模板按采集站拆分（网关 × 支付）
+
+seed 内置一个「两站共骨架」场景：网关 `gateway-svc` 与支付 `pay-svc` 发出完全相同的限流日志骨架，
+Drain 只按模板串归并，两站 200 条事件混进同一个模板（`shared_rate_limited`，`source_id` 为空）。
+该模板历史桶两站反相、混合后历史恒为 6，当前桶两站同时到 6（混合 12）→ 只有混合口径 z=4.047 触发
+尖峰告警；拆开后各站 z=2.023 都在基线内，直观演示「混合计数误报」。
+
+在 `/templates` 选中该模板，详情栏「按采集站拆分」面板：
+
+1. **先给影响范围**：每站事件量 / error 数 / 桶数 / 时间范围、模板上规则与历史告警数（只读预览，不落库）；
+2. **一次性拆分**（admin）：单事务内完成——事件按 `log_event.source_id` 归到各站子模板；
+   模板级告警规则按站复制，原规则留在已无事件的混合模板上，扫描不会再命中、子规则只扫本站子模板；
+   历史告警按「告警桶内主导采集站」归到对应子模板并切到该站规则；
+3. **幂等**：同一模板重复执行直接 409，已拆记录不会被挪回；回滚后可重新拆分（子模板确定性签名，重拆不产生新模板）；
+4. **可恢复**：拆分前完整快照（parent 状态 / 事件归属 / 规则 / 告警）落在 `template_split_job`，
+   回滚按快照恢复；事务中途失败由数据库整体回滚，不留半成品；拆分后新增的漂移数据回滚时也一并迁回并报告 drift；
+5. 面板展示拆分前后口径对比与作业历史，拆分/回滚分别写审计 `templates.split` / `templates.split_rollback`。
+
+接口：`GET /templates/{id}/split-preview` · `POST /templates/{id}/split` ·
+`POST /templates/{id}/split-rollback` · `GET /templates/split-jobs`（写操作仅 admin）。
 
 ## 3. 两个核心算法（Python 真算，结果落库，前端只展示）
 
@@ -113,9 +134,9 @@ gb-555/
 │  └─ src/
 │     ├─ config/                # settings / database / app / celery / bootstrap
 │     ├─ constants/             # enums / roles / error_codes / limits / messages / log_templates
-│     ├─ models/                # log_source / parse_rule / log_template / log_event / alert_rule / alert_event / user / audit_log
+│     ├─ models/                # log_source / parse_rule / log_template / log_event / alert_rule / alert_event / template_split_job / user / audit_log
 │     ├─ schemas/               # 请求响应模型
-│     ├─ services/              # drain_engine / anomaly_engine / source / template / event / alert / import / audit / quota / auth
+│     ├─ services/              # drain_engine / anomaly_engine / source / template / template_split / event / alert / import / audit / quota / auth
 │     ├─ controllers/           # 编排 service + 写审计
 │     ├─ routes/                # health / auth / sources / templates / events / alerts / imports / audit / meta
 │     ├─ middlewares/           # auth / rbac / rate_limit / audit_logger / error_handler
@@ -145,7 +166,7 @@ gb-555/
    `require_permission(action)` 按 `constants/roles.py` 能力矩阵判定；前端 `constants/enums.ts`
    的 `PERMISSION_MATRIX` 与 `stores/authStore.can()` 对应，页面用 `RequireRole` 门禁。
 2. **审计日志**：`audit_log` 表；`services/audit_service.record()` 在 controller 内显式写
-   （login / sources.create|update / parse_rules.create|update / templates.confirm|mark_noise /
+   （login / sources.create|update / parse_rules.create|update / templates.confirm|mark_noise|split|split_rollback /
    events.import_apply / alerts.rule_create|rule_update / alerts.scan / alerts.acknowledge|silence）。
 3. **限流 / 配额**：`middlewares/rate_limit.guard(bucket)` 用 Redis 滑动窗口做每用户每分钟限流
    （读 180 / 写 40 / 扫描 6），写请求额外扣 `services/quota_service` 的每日角色配额，超限统一 429。

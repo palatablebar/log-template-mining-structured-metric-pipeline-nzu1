@@ -33,6 +33,12 @@ class TemplateStatus(StrEnum):
     TENTATIVE = "tentative"   # 样本 < 2，待确认
     CONFIRMED = "confirmed"   # 人工确认
     NOISE = "noise"           # _noise 模板：空行/纯符号行
+    SPLIT = "split"           # 已按采集站拆分（原混合模板保留为拆分痕迹，事件已归子模板）
+
+
+class SplitJobStatus(StrEnum):
+    COMPLETED = "completed"   # 拆分已执行
+    ROLLED_BACK = "rolled_back"  # 已回滚到拆分前
 
 
 class SlotType(StrEnum):

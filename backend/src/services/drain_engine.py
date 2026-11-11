@@ -415,9 +415,17 @@ class DrainEngine:
                 )
             )
 
+        # 已知簇（load_known 灌入）挂在层节点上、不在局部 clusters 里；遍历全部层节点
+        # 收集所有簇，使「命中已知模板」的行也能拿到签名（完全一致 → 库里签名；
+        # 近似合并产生的新签名库里不存在，应用侧自然回落为 pending，保持原行为）。
         final_signature: dict[int, str] = {}
-        for cluster in clusters:
-            final_signature[id(cluster)] = template_signature(cluster.template_str())
+        for layer in self._layers.values():
+            stack = [layer]
+            while stack:
+                node = stack.pop()
+                for cluster in node.clusters:
+                    final_signature.setdefault(id(cluster), template_signature(cluster.template_str()))
+                stack.extend(node.children.values())
         line_signatures: list[str | None] = [
             final_signature.get(id(ref)) if ref is not None else None for ref in position_cluster
         ]

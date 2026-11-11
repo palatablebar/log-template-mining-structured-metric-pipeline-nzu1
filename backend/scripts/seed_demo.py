@@ -9,8 +9,10 @@
 - alert_rule.name
 
 演示数据集（与 SEED_SUMMARY 严格一致）：
-  4 个日志源 / 8 条解析规则 / 8 个已挖掘模板 / 6240 条事件（6000 已归类 + 240 待归类新格式）
-  / 3 条告警规则 / 2 条已触发告警 / 3 个用户。
+  4 个日志源 / 8 条解析规则 / 9 个已挖掘模板（含 1 个网关/支付两站共骨架的混合模板）
+  / 6440 条事件（6200 已归类 + 240 待归类新格式）
+  / 4 条告警规则 / 3 条已触发告警 / 3 个用户。
+混合模板可在 /templates 模板页发起「按采集站拆分」，把两站事件、规则与告警归到各自子模板。
 """
 from __future__ import annotations
 
@@ -91,6 +93,13 @@ ALERT_RULES = (
         "metric": AlertMetric.SPIKE.value,
         "z_threshold": 3.5,
         "description": "网关请求完成模板：单桶计数相对 12 桶基线 z>3.5 时告警。",
+    },
+    {
+        "name": "网关/支付限流混合模板尖峰",
+        "template_key": "shared_rate_limited",
+        "metric": AlertMetric.SPIKE.value,
+        "z_threshold": 3.5,
+        "description": "网关与支付两站共骨架的限流混合模板：拆分前按混合计数判定；拆分后规则随采集站复制，各站独立计数。",
     },
 )
 
@@ -176,7 +185,11 @@ def _upsert_parse_rules(db, sources: dict[str, LogSource]) -> None:
 
 
 def _mine_seeded_templates(db) -> dict[str, LogTemplate]:
-    """对 8 个格式各跑一次 Drain（真算），得到 8 个模板并落库。"""
+    """对 9 个格式各跑一次 Drain（真算），得到 9 个模板并落库。
+
+    shared_rate_limited 是网关/支付两站共骨架：喂给 Drain 的行包含两个 service，
+    service 位被通配成 <*>，产出一个跨站混合模板，落库时 source_id 置空、service 留空。
+    """
     template_rows: dict[str, LogTemplate] = {}
     by_format: dict[str, list[str]] = {spec.key: [] for spec in fixtures.SEEDED_FORMATS}
     for event in fixtures.generate_seeded_events(settings.seed_anchor):
@@ -196,18 +209,20 @@ def _mine_seeded_templates(db) -> dict[str, LogTemplate]:
             _log("SEED_SKIPPED", "log_template", f"{spec.key}")
             template_rows[spec.key] = existing
             continue
-        source = next((item for item in DEMO_SOURCES if item[1] == spec.service), None)
         source_row = None
-        if source is not None:
-            source_row = db.execute(select(LogSource).where(LogSource.name == source[0])).scalar_one_or_none()
+        if spec.key != fixtures.SHARED_TEMPLATE_KEY:
+            source = next((item for item in DEMO_SOURCES if item[1] == spec.service), None)
+            if source is not None:
+                source_row = db.execute(select(LogSource).where(LogSource.name == source[0])).scalar_one_or_none()
         row = LogTemplate(
             signature=template.signature,
             template_str=template.template_str,
             token_count=template.token_count,
             slot_types=template.slot_types,
             slot_names=template.slot_names,
+            # 混合模板不属于任何单一采集站，source_id 留空
             source_id=source_row.id if source_row else None,
-            service=spec.service,
+            service=template.service if spec.key != fixtures.SHARED_TEMPLATE_KEY else "",
             sample_line=template.sample_line,
             level_hint=template.level_hint,
             status=TemplateStatus.MINED.value,

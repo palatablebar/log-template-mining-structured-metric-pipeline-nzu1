@@ -2,7 +2,8 @@
 
 同一份生成器同时服务三处，保证「seed 里 pending 的 240 行」与「/import 上传的样本」
 逐字一致，导入时可按 line_hash 去重：
-1. `scripts/seed_demo.py`：8 个已挖掘模板的 6000 行 + 240 行待归类新格式 + 9 行噪声；
+1. `scripts/seed_demo.py`：8 个常规模板各 750 行（6000 行）+ 两站共骨架混合模板 200 行
+   + 240 行待归类新格式 + 9 行噪声（已归类合计 6200 行，事件总数 6440）；
 2. `GET /api/imports/sample`：返回 249 行样本文件（240 新格式 + 9 噪声）；
 3. 端到端测试脚本：把样本落盘再上传。
 
@@ -129,6 +130,18 @@ SEEDED_FORMATS: tuple[FormatSpec, ...] = (
         level_pattern="info",
         slug="charge accepted",
     ),
+    # 第 9 个格式是「两站共骨架」：网关与支付采集站发出完全相同的限流日志骨架，
+    # Drain 只按模板串归并，两站事件因此混进同一个模板（service 位在挖掘时被通配成 <*>）。
+    FormatSpec(
+        key="shared_rate_limited",
+        service="",
+        template=(
+            "{ts} WARN <*> rate limited requests count={items} window_s=60 limit=200 "
+            "remaining=0 policy=global-shared trace={trace} region=cn-east"
+        ),
+        level_pattern="warn",
+        slug="rate limited",
+    ),
 )
 
 # ---------------------------------------------------------------- 3 种新格式（5 个形态）
@@ -207,9 +220,25 @@ NOISE_LINES: tuple[str, ...] = (
     "#####",
 )
 
-# 事件数：6000（8 模板 × 750）+ 240 待归类 = 6240
+# 常规 8 模板各 750 行 = 6000；另加两站共骨架混合模板 200 行（SHARED_TEMPLATE_TOTAL）；
+# 已归类合计 6200，加 240 待归类 = 6440 事件
 EVENTS_PER_SEEDED_TEMPLATE = 750
 PENDING_LINES_TOTAL = 240
+
+# 「两站共骨架」混合模板（shared_rate_limited）：网关 60% / 支付 40%，合计 200 行
+SHARED_TEMPLATE_KEY = "shared_rate_limited"
+SHARED_TEMPLATE_TOTAL = 200
+SHARED_SOURCES: tuple[tuple[str, str, int], ...] = (
+    # (service, source_name 与 seed 的 log_source.name 对齐, 分配行数)
+    ("gateway-svc", "gateway-svc", 120),
+    ("pay-svc", "pay-svc", 80),
+)
+# 12 个历史桶两站反相波动：各自 median=3 / MAD=1，混合后历史恒为 6（MAD=0）；
+# 当前桶两站同时到 6（混合 12），于是只有「混合口径」z 超 3.5，拆开后各站都在基线内。
+SHARED_GATEWAY_PATTERN = (2, 4, 2, 4, 2, 4, 2, 4, 2, 4, 2, 4)
+SHARED_PAY_PATTERN = (4, 2, 4, 2, 4, 2, 4, 2, 4, 2, 4, 2)
+SHARED_GATEWAY_CURRENT = 6
+SHARED_PAY_CURRENT = 6
 
 # 当前桶（anchored at SEED_ANCHOR）之前的 12 个桶的计数曲线
 SPIKE_TEMPLATE_KEY = "gateway_timeout"
@@ -328,10 +357,13 @@ def _emit(spec: FormatSpec, index: int, bucket_start_at: datetime, within_bucket
 
 
 def generate_seeded_events(anchor_text: str) -> list[GeneratedEvent]:
-    """6000 条已归类事件：每个格式 750 行，按设计好的桶内计数分布。"""
+    """常规 8 模板各 750 行（按设计好的桶内计数分布）+ 两站共骨架混合模板 200 行。"""
     current = current_bucket(anchor_text)
     events: list[GeneratedEvent] = []
     for spec in SEEDED_FORMATS:
+        if spec.key == SHARED_TEMPLATE_KEY:
+            # 混合模板在 generate_shared_events 里单独按采集站生成
+            continue
         if spec.key == SPIKE_TEMPLATE_KEY:
             counts_head, older = _bucket_counts(EVENTS_PER_SEEDED_TEMPLATE, SPIKE_PATTERN, SPIKE_CURRENT_COUNT)
         else:
@@ -360,7 +392,101 @@ def generate_seeded_events(anchor_text: str) -> list[GeneratedEvent]:
                 index += 1
         if index != EVENTS_PER_SEEDED_TEMPLATE:
             raise RuntimeError(f"{spec.key}: 生成 {index} 行，期望 {EVENTS_PER_SEEDED_TEMPLATE}")
+    events.extend(generate_shared_events(anchor_text))
     return events
+
+
+def generate_shared_events(anchor_text: str) -> list[GeneratedEvent]:
+    """两站共骨架的 200 条混合事件：同一模板串、两个 service、按 6:4 固定分配到网关/支付。
+
+    两站的行在时间轴上交错生成（按桶交替），更贴近真实采集；source_name 决定事件归属的
+    log_source，渲染时把模板里的 <*> 服务位替换成具体 service，Drain 仍会归并成同一模板。
+    """
+    current = current_bucket(anchor_text)
+    spec = next(item for item in SEEDED_FORMATS if item.key == SHARED_TEMPLATE_KEY)
+    plans = (
+        ("gateway-svc", SHARED_GATEWAY_PATTERN, SHARED_GATEWAY_CURRENT),
+        ("pay-svc", SHARED_PAY_PATTERN, SHARED_PAY_CURRENT),
+    )
+    generated: list[GeneratedEvent] = []
+    totals = {service: 0 for service, _, _ in plans}
+
+    def emit_one(service: str, index: int, bucket_at: datetime, within_bucket: int) -> GeneratedEvent:
+        raw_spec = FormatSpec(
+            key=spec.key,
+            service=service,
+            template=spec.template.replace("{ts} {level} <*>", "{ts} {level} " + service),
+            level_pattern=spec.level_pattern,
+            slug=spec.slug,
+        )
+        event = _emit(raw_spec, index, bucket_at, within_bucket, spec.level_pattern)
+        return GeneratedEvent(
+            raw_line=event.raw_line,
+            event_time=event.event_time,
+            level=event.level,
+            service=service,
+            format_key=SHARED_TEMPLATE_KEY,
+            source_name=service,
+        )
+
+    # 当前桶：两站交错
+    index = 0
+    for offset in range(max(SHARED_GATEWAY_CURRENT, SHARED_PAY_CURRENT)):
+        if offset < SHARED_GATEWAY_CURRENT:
+            generated.append(emit_one("gateway-svc", index, current, offset * 21))
+            index += 1
+            totals["gateway-svc"] += 1
+        if offset < SHARED_PAY_CURRENT:
+            generated.append(emit_one("pay-svc", index, current, offset * 21 + 7))
+            index += 1
+            totals["pay-svc"] += 1
+
+    # 历史 12 桶：按桶交替，桶内两站连续发
+    for bucket_index in range(1, 13):
+        bucket_at = current - timedelta(minutes=BUCKET_MINUTES * bucket_index)
+        gw_count = SHARED_GATEWAY_PATTERN[bucket_index - 1]
+        pay_count = SHARED_PAY_PATTERN[bucket_index - 1]
+        for offset in range(gw_count):
+            generated.append(emit_one("gateway-svc", index, bucket_at, offset * 19))
+            index += 1
+            totals["gateway-svc"] += 1
+        for offset in range(pay_count):
+            generated.append(emit_one("pay-svc", index, bucket_at, offset * 19 + 5))
+            index += 1
+            totals["pay-svc"] += 1
+
+    # 余额摊到更早的桶（按 120/80 目标反推，保证两站总量精确，不进基线窗口）
+    older_total = SHARED_TEMPLATE_TOTAL - index
+    if older_total < 0:
+        raise RuntimeError(f"{SHARED_TEMPLATE_KEY}: 设计桶已超量 index={index}")
+    older_buckets = 131
+    older_plans = (
+        ("gateway-svc", 120 - totals["gateway-svc"]),
+        ("pay-svc", 80 - totals["pay-svc"]),
+    )
+    if sum(older for _, older in older_plans) != older_total:
+        raise RuntimeError(
+            f"{SHARED_TEMPLATE_KEY}: 老桶分配 {older_plans} 之和 != {older_total}"
+        )
+    for service, older in older_plans:
+        per_bucket = _distribute_older(older, older_buckets)
+        local_index = 0
+        for bucket_index, count in enumerate(per_bucket, start=13):
+            bucket_at = current - timedelta(minutes=BUCKET_MINUTES * bucket_index)
+            for offset in range(count):
+                generated.append(emit_one(service, index, bucket_at, offset * 23))
+                index += 1
+                local_index += 1
+                totals[service] += 1
+        if local_index != older:
+            raise RuntimeError(f"{SHARED_TEMPLATE_KEY}/{service}: 老桶 {local_index} != {older}")
+
+    expected = {"gateway-svc": 120, "pay-svc": 80}
+    if totals != expected:
+        raise RuntimeError(f"{SHARED_TEMPLATE_KEY}: 分配 {totals} != {expected}")
+    if len(generated) != SHARED_TEMPLATE_TOTAL:
+        raise RuntimeError(f"{SHARED_TEMPLATE_KEY}: 生成 {len(generated)} 行，期望 {SHARED_TEMPLATE_TOTAL}")
+    return generated
 
 
 def generate_pending_events(anchor_text: str) -> list[GeneratedEvent]:
@@ -410,10 +536,11 @@ def summarize_plans() -> dict:
     return {
         "seeded_formats": [spec.key for spec in SEEDED_FORMATS],
         "new_formats": [spec.key for spec in NEW_FORMATS],
-        "seeded_events": EVENTS_PER_SEEDED_TEMPLATE * len(SEEDED_FORMATS),
+        "seeded_events": EVENTS_PER_SEEDED_TEMPLATE * (len(SEEDED_FORMATS) - 1) + SHARED_TEMPLATE_TOTAL,
         "pending_events": PENDING_LINES_TOTAL,
         "noise_lines": len(NOISE_LINES),
         "import_sample_lines": PENDING_LINES_TOTAL + len(NOISE_LINES),
         "spike_template": SPIKE_TEMPLATE_KEY,
         "error_ratio_template": ERROR_RATIO_TEMPLATE_KEY,
+        "shared_mixed_template": SHARED_TEMPLATE_KEY,
     }

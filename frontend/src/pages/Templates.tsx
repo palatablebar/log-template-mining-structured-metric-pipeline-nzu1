@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { templateApi } from '../api/template';
 import { EmptyState } from '../components/common/EmptyState';
 import { GaugeMeter } from '../components/common/GaugeMeter';
+import { SplitPanel } from '../components/common/SplitPanel';
 import { StatusPill } from '../components/common/StatusPill';
 import { TemplateTokenStrip } from '../components/common/TemplateTokenStrip';
 import { SLOT_LABELS, TEMPLATE_STATUSES, TEMPLATE_STATUS_LABELS } from '../constants/enums';
@@ -16,7 +17,7 @@ import { slotClass } from '../utils/slotColor';
 import { useState } from 'react';
 
 export const TemplatesPage = () => {
-  const { templates, selected, filter, loading, error, load, select, setFilter } = useTemplateStore();
+  const { templates, selected, filter, loading, error, load, select, setFilter, refreshSelected } = useTemplateStore();
   const can = useAuthStore((state) => state.can);
   const [notice, setNotice] = useState('');
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -161,7 +162,9 @@ export const TemplatesPage = () => {
                             slotNames={template.slot_names}
                           />
                           <div className="mono" style={{ color: 'var(--ink-dim)', marginTop: 4 }}>
-                            {template.service} · 首次 {formatTime(template.first_seen_at)} · {template.origin}
+                            {template.service || (template.status === 'split' ? '跨采集站 · 已拆分' : '跨采集站混合')} · 首次{' '}
+                            {formatTime(template.first_seen_at)} · {template.origin}
+                            {template.status === 'split' ? ' · 原混合模板保留' : ''}
                           </div>
                         </td>
                         <td className="num">{template.token_count}</td>
@@ -222,6 +225,15 @@ export const TemplatesPage = () => {
                     </button>
                   </div>
                   {!can('templates:write') ? <p className="hint">当前角色只读，确认动作由 admin 执行。</p> : null}
+
+                  <SplitPanel
+                    template={selected}
+                    canWrite={can('templates:write')}
+                    onChanged={async () => {
+                      await load();
+                      await refreshSelected(selected.id);
+                    }}
+                  />
                 </>
               ) : (
                 <EmptyState title="选择左侧模板" hint="查看槽位分布、样例行与确认动作。" />

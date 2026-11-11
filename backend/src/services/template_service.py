@@ -78,6 +78,48 @@ def get_template(db: Session, template_id: int) -> dict:
     payload["samples"] = [
         {"raw_line": row[0], "level": row[1], "event_time": row[2].isoformat(sep=" ")} for row in samples
     ]
+    # 采集站分布：混合模板的拆分依据；已拆分模板展示当前归属（自身 0 事件 + 子模板）
+    source_rows = db.execute(
+        select(
+            LogEvent.source_id,
+            LogSource.name,
+            func.count(LogEvent.id),
+        )
+        .join(LogSource, LogSource.id == LogEvent.source_id)
+        .where(LogEvent.template_id == template_id)
+        .group_by(LogEvent.source_id, LogSource.name)
+        .order_by(func.count(LogEvent.id).desc())
+    ).all()
+    payload["source_breakdown"] = [
+        {"source_id": int(row[0]), "source_name": row[1], "event_count": int(row[2] or 0)}
+        for row in source_rows
+    ]
+    from src.models.template_split_job import TemplateSplitJob
+    from src.constants.enums import SplitJobStatus
+
+    job = db.execute(
+        select(TemplateSplitJob).where(
+            TemplateSplitJob.template_id == template_id,
+            TemplateSplitJob.job_type == "by_source",
+        )
+    ).scalar_one_or_none()
+    payload["split_job"] = (
+        {
+            "id": job.id,
+            "status": job.status,
+            "child_template_ids": list(job.child_template_ids or []),
+            "moved_events": job.moved_events,
+            "moved_alerts": job.moved_alerts,
+            "duplicated_rules": job.duplicated_rules,
+            "executed_at": job.executed_at.isoformat(sep=" ") if job.executed_at else None,
+            "rolled_back_at": job.rolled_back_at.isoformat(sep=" ") if job.rolled_back_at else None,
+        }
+        if job is not None
+        else None
+    )
+    payload["is_split"] = bool(
+        job is not None and job.status == SplitJobStatus.COMPLETED.value
+    ) or template.status == "split"
     return payload
 
 

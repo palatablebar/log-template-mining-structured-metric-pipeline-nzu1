@@ -9,6 +9,7 @@ from src.models.log_event import LogEvent
 from src.models.log_source import LogSource
 from src.models.log_template import LogTemplate
 from src.models.parse_rule import ParseRule
+from src.models.template_split_job import TemplateSplitJob
 from src.models.user import User
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "LogSource",
     "LogTemplate",
     "ParseRule",
+    "TemplateSplitJob",
     "User",
 ]
